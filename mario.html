@@ -1,0 +1,1085 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>超级玛丽 · 网页版</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  html, body {
+    height: 100%;
+    background: #000;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  #game {
+    position: relative;
+    width: 800px; height: 480px;
+    box-shadow: 0 0 30px rgba(80,160,255,.35);
+  }
+  canvas { display: block; background: #6b8cff; }
+  #hud {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 36px;
+    display: flex; align-items: center; gap: 26px;
+    padding: 0 16px;
+    font: bold 16px "Courier New", monospace;
+    color: #fff;
+    text-shadow: 2px 2px 0 #000;
+    pointer-events: none;
+    z-index: 2;
+  }
+  #hud .item { display: flex; flex-direction: column; line-height: 1.05; }
+  #hud .item small { font-size: 11px; opacity: .85; letter-spacing: 1px; }
+  #hud .item b { font-size: 18px; }
+  .overlay {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,.72);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 5;
+  }
+  .overlay.hidden { display: none; }
+  .panel {
+    background: linear-gradient(#5c94fc, #2c5cb0);
+    border: 4px solid #143a78; border-radius: 14px;
+    padding: 26px 40px; text-align: center; max-width: 560px;
+    color: #fff;
+  }
+  .panel h1 { font-size: 30px; margin-bottom: 10px; text-shadow: 3px 3px 0 #143a78; }
+  .panel p { font-size: 14px; line-height: 1.9; margin-bottom: 14px; }
+  .panel .keys { font-size: 13px; opacity: .92; }
+  .bigBtn {
+    font-size: 20px; font-weight: bold; color: #fff;
+    background: linear-gradient(#e04040, #b01818);
+    border: 3px solid #7a0808; border-radius: 10px;
+    padding: 9px 30px; cursor: pointer;
+    box-shadow: 0 4px 0 #7a0808;
+    margin-top: 6px;
+  }
+  .bigBtn:active { transform: translateY(3px); box-shadow: 0 1px 0 #7a0808; }
+  #hint {
+    position: absolute; bottom: 6px; left: 0; right: 0;
+    text-align: center; color: rgba(255,255,255,.7);
+    font-size: 12px; text-shadow: 1px 1px 0 #000;
+    pointer-events: none; z-index: 2;
+  }
+</style>
+</head>
+<body>
+<div id="game">
+  <canvas id="cv" width="800" height="480"></canvas>
+  <div id="hud">
+    <div class="item"><small>MARIO</small><b id="score">0</b></div>
+    <div class="item"><small>COINS</small><b id="coins">×00</b></div>
+    <div class="item"><small>WORLD</small><b id="world">1-1</b></div>
+    <div class="item"><small>TIME</small><b id="time">300</b></div>
+    <div class="item"><small>LIVES</small><b id="lives">×3</b></div>
+  </div>
+  <div id="hint">← → 移动 · ↑/Space 跳跃（长按跳更高）· Shift 加速跑</div>
+  <div class="overlay" id="startOv">
+    <div class="panel">
+      <h1>🍄 超级玛丽</h1>
+      <p>操控玛丽穿越蘑菇王国！<br>吃🍄变大、撞问号砖得金币与蘑菇、<br>踩扁栗宝宝、跳过深坑，冲向终点的旗杆！</p>
+      <p class="keys">← → 左右移动　|　↑ 或 空格 跳跃（长按跳更高）<br>Shift 加速跑　|　掉坑或被撞会减命</p>
+      <button class="bigBtn" id="startBtn">开始游戏</button>
+    </div>
+  </div>
+  <div class="overlay hidden" id="endOv">
+    <div class="panel">
+      <h1 id="endTitle">通关！</h1>
+      <p id="endText"></p>
+      <button class="bigBtn" id="restartBtn">再来一局</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ===================== 基础常量 ===================== */
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const VW = 800, VH = 480, TILE = 32, ROWS = 15;
+const COLS_VISIBLE = VW / TILE;
+
+/* 瓦片类型 */
+const T = {
+  EMPTY: 0, GROUND: 1, BRICK: 2, QUESTION: 3, USED: 4,
+  PIPE: 5, STAIR: 6, FLAGPOLE: 7, FLAGTOP: 8, COIN: 9,
+  CLOUD: 10, HILL: 11, BUSH: 12, LUCKY: 13, HARD: 14
+};
+const SOLID = new Set([T.GROUND, T.BRICK, T.QUESTION, T.USED, T.PIPE, T.STAIR, T.HARD]);
+
+/* 物理（像素/秒） */
+const GRAVITY = 2200, GRAVITY_HOLD = 900, MAX_FALL = 620;
+const MOVE_ACCEL = 1500, RUN_ACCEL = 2100, MAX_WALK = 175, MAX_RUN = 260;
+const FRICTION = 1400, JUMP_V = -640, JUMP_HOLD_MAX = 0.22;
+const BOUNCE_V = -380, STOMP_V = -420, ENEMY_SPEED = 48, MUSH_SPEED = 70;
+
+/* DOM */
+const scoreEl = document.getElementById("score");
+const coinsEl = document.getElementById("coins");
+const timeEl = document.getElementById("time");
+const livesEl = document.getElementById("lives");
+const startOv = document.getElementById("startOv");
+const endOv = document.getElementById("endOv");
+const endTitle = document.getElementById("endTitle");
+const endText = document.getElementById("endText");
+
+/* ===================== 音效 ===================== */
+const Sound = {
+  ctx: null, muted: false,
+  ensure() { if (!this.ctx) try { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} },
+  tone(freq, dur, type, vol, when) {
+    if (this.muted || !this.ctx) return;
+    const t = this.ctx.currentTime + (when || 0);
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = type || "square";
+    o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(vol || .05, t);
+    g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    o.connect(g); g.connect(this.ctx.destination);
+    o.start(t); o.stop(t + dur);
+  },
+  jump()  { this.tone(520, .12, "square", .04); this.tone(780, .1, "square", .035, .07); },
+  coin()  { this.tone(988, .07, "square", .04); this.tone(1319, .16, "square", .04, .07); },
+  stomp() { this.tone(180, .1, "square", .05); this.tone(90, .12, "sawtooth", .05, .05); },
+  bump()  { this.tone(140, .09, "square", .05); },
+  brick() { this.tone(220, .05, "square", .05); this.tone(120, .08, "sawtooth", .05, .04); },
+  grow()  { this.tone(440,.08,"square",.05); this.tone(660,.08,"square",.05,.08); this.tone(880,.12,"square",.05,.16); },
+  die()   { this.tone(440,.2,"square",.06); this.tone(330,.25,"square",.06,.2); this.tone(220,.4,"sawtooth",.06,.4); },
+  win()   { [660,660,660,880,660,1047,880].forEach((f,i)=>this.tone(f,.16,"square",.05,i*.18)); },
+  pipe()  { this.tone(220,.3,"sine",.05); }
+};
+
+/* ===================== 输入 ===================== */
+const keys = {};
+const input = { left:false, right:false, run:false, jump:false, jumpPressed:false, jumpBuffer:0 };
+window.addEventListener("keydown", (e) => {
+  const k = e.key.toLowerCase();
+  if (["arrowleft","a","arrowright","d","arrowup","w"," ","shift"].includes(k)) e.preventDefault();
+  if (keys[k]) return;
+  keys[k] = true;
+  if (k === "arrowup" || k === "w" || k === " ") { input.jumpPressed = true; input.jumpBuffer = 0.12; }
+  Sound.ensure();
+});
+window.addEventListener("keyup", (e) => {
+  const k = e.key.toLowerCase(); keys[k] = false;
+});
+let prevJump = false;
+function readInput() {
+  input.left  = keys["arrowleft"] || keys["a"];
+  input.right = keys["arrowright"] || keys["d"];
+  input.run   = keys["shift"];
+  const j = keys["arrowup"] || keys["w"] || keys[" "];
+  if (j && !prevJump) { input.jumpPressed = true; input.jumpBuffer = 0.12; } // 上升沿 + 跳跃缓冲
+  input.jump = j;
+  prevJump = j;
+}
+
+/* ===================== 关卡构建 ===================== */
+let LW = 0;
+let level = [];           // level[r][c] 瓦片
+let blockContent = {};    // "r,c" -> 内容
+let bumpTimers = {};      // "r,c" -> 砖块顶起动画计时
+
+function buildLevel() {
+  LW = 211; // 关卡宽度（瓦片数），与经典 1-1 等长
+  level = [];
+  for (let r = 0; r < ROWS; r++) level.push(new Array(LW).fill(T.EMPTY));
+  blockContent = {};
+  bumpTimers = {};
+
+  // —— 地面：分段，中间留坑 ——
+  const pits = [[69,70],[86,86],[101,101],[134,135],[153,154],[167,167]];
+  function inPit(c){ return pits.some(p=>c>=p[0]&&c<=p[1]); }
+  for (let c = 0; c < LW; c++) {
+    if (!inPit(c)) { level[13][c] = T.GROUND; level[14][c] = T.GROUND; }
+  }
+
+  // —— 问号砖 / 砖块 / 金币 集中布置 ——
+  const set = (r, c, t, content) => {
+    if (r < 0 || r >= ROWS || c < 0 || c >= LW) return;
+    level[r][c] = t;
+    if (content) blockContent[r + "," + c] = content;
+  };
+
+  // 开场：问号砖(金币)
+  set(9, 6, T.QUESTION, "coin");
+  // 砖块 + 问号(蘑菇) 群
+  set(9, 16, T.QUESTION, "mushroom");
+  set(9, 20, T.BRICK);
+  set(9, 21, T.QUESTION, "coin");
+  set(9, 22, T.BRICK);
+  set(9, 23, T.QUESTION, "coin");
+  set(9, 24, T.BRICK);
+  // 空中金币串
+  for (let c = 21; c <= 24; c++) set(6, c, T.COIN);
+  // 水管三段
+  pipe(28, 2); pipe(38, 3); pipe(46, 4);
+  pipe(57, 4);
+  // 中段砖块群+问号
+  set(9, 64, T.QUESTION, "coin");
+  set(9, 77, T.BRICK);
+  set(9, 78, T.QUESTION, "coin");
+  set(9, 79, T.BRICK);
+  set(5, 80, T.COIN); set(5, 81, T.COIN);
+  // 阶梯（上楼再下坑）
+  stair(78, 5, true);  // 上升阶梯
+  // 浮空金币平台
+  set(8, 91, T.BRICK); set(8, 92, T.COIN); set(8, 93, T.BRICK); set(8, 94, T.COIN); set(8, 95, T.BRICK);
+  set(9, 100, T.QUESTION, "coin");
+  // 高处问号(蘑菇)
+  set(6, 101, T.QUESTION, "mushroom");
+  set(5, 102, T.COIN); set(5, 103, T.COIN); set(5, 104, T.COIN);
+  // 水管
+  pipe(112, 4);
+  // 砖块墙+金币
+  set(9, 118, T.BRICK); set(9, 119, T.QUESTION, "coin"); set(9, 120, T.BRICK);
+  // 砖块金字塔
+  for (let i = 0; i < 5; i++) set(12 - i, 126 + i, T.BRICK);
+  // 大坑后的连跳
+  set(9, 137, T.BRICK); set(9, 138, T.COIN); set(9, 139, T.BRICK);
+  // 终点阶梯
+  stair(150, 4, true);
+  // 旗杆
+  set(12, 190, T.FLAGTOP); // 旗顶其实画在专用代码里
+  for (let r = 3; r <= 12; r++) set(r, 190, T.FLAGPOLE);
+  set(13, 190, T.HARD);   // 旗杆底座
+  set(13, 198, T.HARD); set(13, 199, T.HARD); // 城堡前地
+
+  // 装饰：云、山、灌木
+  for (const c of [8, 30, 52, 84, 122, 170]) {
+    for (let i = 0; i < 3; i++) level[2][c + i] = T.CLOUD;
+    for (let i = 0; i < 4; i++) { level[11][c + i] = T.BUSH; }
+  }
+  for (const c of [20, 66, 110, 160]) {
+    level[11][c] = T.HILL; level[11][c+1] = T.HILL; level[10][c] = T.HILL;
+  }
+
+  // 放置敌人 / 金币生成
+  goombas = [];
+  spawnGoomba(22, 12); spawnGoomba(40, 12); spawnGoomba(51, 12);
+  spawnGoomba(80, 12); spawnGoomba(82, 12);
+  spawnGoomba(97, 12); spawnGoomba(113, 7); // 113 在水管顶?不，y=12 地面
+  spawnGoomba(120, 12); spawnGoomba(121, 12);
+  spawnGoomba(140, 12); spawnGoomba(155, 12); spawnGoomba(160, 12);
+
+  // 道具/粒子/相机
+  items = []; particles = []; coins = []; floatingScores = [];
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < LW; c++) if (level[r][c] === T.COIN) coins.push({ r, c, x: c*TILE, y: r*TILE });
+
+  camX = 0;
+  checkpoints = [{ x: 8 * TILE, used: false }, { x: 90 * TILE, used: false }, { x: 150 * TILE, used: false }];
+}
+
+function pipe(col, h) {
+  for (let i = 0; i < h; i++) level[13 - i][col] = T.PIPE;
+  level[13 - h][col] = T.PIPE; // 顶部
+}
+function stair(startCol, h, up) {
+  for (let i = 0; i < h; i++) {
+    for (let j = 0; j <= i; j++) level[12 - j][startCol + i] = T.STAIR;
+  }
+}
+
+/* ===================== 实体 ===================== */
+let player, goombas, items, particles, coins, floatingScores;
+let camX, checkpoints;
+
+const PLAYER_SMALL = { w: 22, h: 28 };
+const PLAYER_BIG = { w: 22, h: 54 };
+
+function makePlayer(big) {
+  const p = {
+    x: 2 * TILE, y: 11 * TILE,
+    vx: 0, vy: 0,
+    w: big ? PLAYER_BIG.w : PLAYER_SMALL.w,
+    h: big ? PLAYER_BIG.h : PLAYER_SMALL.h,
+    big: big, facing: 1, onGround: false,
+    jumpHold: 0, jumping: false,
+    invuln: 0, dead: false, deadT: 0,
+    walkAnim: 0, crouch: false,
+    sliding: false, slideT: 0
+  };
+  p.y = (13 * TILE) - p.h; // 站在地面
+  return p;
+}
+
+function spawnGoomba(col, row) {
+  goombas.push({
+    x: col * TILE + 4, y: row * TILE + (32 - 28),
+    w: 26, h: 28, vx: -ENEMY_SPEED, vy: 0,
+    dir: -1, alive: true, squashed: false, squashT: 0,
+    onGround: false, anim: Math.random() * 6
+  });
+}
+
+function spawnItem(x, y, type) {
+  // 从砖块里弹出来：先上升约 32px 再开始移动
+  items.push({
+    x, y, w: 24, h: 24, type,
+    vx: MUSH_SPEED, vy: 0, dir: 1,
+    emerge: 32, onGround: false, alive: true, anim: 0
+  });
+}
+
+function spawnCoinPop(x, y) {
+  particles.push({ type: "coin", x, y, vy: -460, vx: 0, t: 0, life: .5 });
+  floatingScores.push({ x, y: y - 10, text: "200", t: 0, life: .8 });
+}
+
+function spawnBrickDebris(x, y) {
+  for (let i = 0; i < 4; i++) {
+    particles.push({
+      type: "debris", x, y, vx: (i % 2 ? 120 : -120) + (Math.random()*60-30),
+      vy: -260 - Math.random() * 120, t: 0, life: .9
+    });
+  }
+}
+
+/* ===================== 瓦片碰撞 ===================== */
+function tileAt(r, c) {
+  if (r < 0 || r >= ROWS || c < 0 || c >= LW) return T.EMPTY;
+  return level[r][c];
+}
+function isSolidAt(r, c) { return SOLID.has(tileAt(r, c)); }
+
+function collideX(e, dt) {
+  e.x += e.vx * dt;
+  const top = e.y, bottom = e.y + e.h - 0.1;
+  const r0 = Math.floor(top / TILE), r1 = Math.floor(bottom / TILE);
+  if (e.vx > 0) {
+    const c = Math.floor((e.x + e.w) / TILE);
+    for (let r = r0; r <= r1; r++) if (isSolidAt(r, c)) { e.x = c * TILE - e.w; e.vx = 0; e.hitWall = 1; break; }
+  } else if (e.vx < 0) {
+    const c = Math.floor(e.x / TILE);
+    for (let r = r0; r <= r1; r++) if (isSolidAt(r, c)) { e.x = (c + 1) * TILE; e.vx = 0; e.hitWall = -1; break; }
+  }
+}
+function collideY(e, dt, isPlayer) {
+  e.y += e.vy * dt; // 先做 y 轴速度积分，再解算碰撞
+  const left = e.x + 1, right = e.x + e.w - 1;
+  const c0 = Math.floor(left / TILE), c1 = Math.floor(right / TILE);
+  if (e.vy > 0) {
+    const r = Math.floor((e.y + e.h) / TILE);
+    for (let c = c0; c <= c1; c++) if (isSolidAt(r, c)) { e.y = r * TILE - e.h; e.vy = 0; e.onGround = true; break; }
+  } else if (e.vy < 0) {
+    const r = Math.floor(e.y / TILE);
+    for (let c = c0; c <= c1; c++) if (isSolidAt(r, c)) {
+      e.y = (r + 1) * TILE; e.vy = 0;
+      if (isPlayer) e.headBump = { r, c };
+      break;
+    }
+  }
+}
+
+/* ===================== 游戏状态 ===================== */
+const game = {
+  state: "ready", // ready | playing | dying | dead | won | gameover
+  score: 0, coinCount: 0, lives: 3, time: 300, timeAccum: 0,
+  flagSlide: 0, flagX: 0,
+
+  reset(full) {
+    buildLevel();
+    player = makePlayer(false);
+    if (full) { this.score = 0; this.coinCount = 0; this.lives = 3; }
+    this.time = 300; this.timeAccum = 0;
+    this.state = "playing";
+    this.flagSlide = 0;
+    this.flagX = 190 * TILE;
+    input.jumpBuffer = 0; input.jumpPressed = false;
+    Object.keys(keys).forEach(k => delete keys[k]);
+    prevJump = false;
+    this.updateHUD();
+  },
+
+  start() {
+    Sound.ensure();
+    this.reset(true);
+    startOv.classList.add("hidden");
+    endOv.classList.add("hidden");
+  },
+
+  addScore(n) { this.score += n; this.updateHUD(); },
+  addCoin() {
+    this.coinCount++;
+    if (this.coinCount >= 100) { this.coinCount = 0; this.lives++; Sound.grow(); }
+    this.updateHUD();
+  },
+
+  killPlayer() {
+    if (player.dead) return;
+    player.dead = true; player.deadT = 0;
+    this.state = "dying";
+    player.vy = -520; player.vx = 0;
+    Sound.die();
+  },
+
+  respawn() {
+    let cx = 2 * TILE;
+    for (const cp of checkpoints) if (cp.used) cx = cp.x;
+    player = makePlayer(false); // makePlayer 已把 y 设为贴地位置
+    player.x = cx;
+    this.time = 300; this.timeAccum = 0;
+    this.state = "playing";
+    input.jumpBuffer = 0; input.jumpPressed = false;
+    Object.keys(keys).forEach(k => delete keys[k]);
+    prevJump = false;
+    camX = Math.max(0, Math.min(cx - VW / 2, (LW * TILE) - VW));
+  },
+
+  win() {
+    this.state = "won";
+    Sound.win();
+    endTitle.textContent = "🏁 通关！";
+    endText.innerHTML = "你成功插上了旗杆！<br>得分：<b>" + this.score +
+      "</b>　金币：<b>" + this.coinCount + "</b><br>剩余时间：<b>" + Math.ceil(this.time) + "</b>";
+    endOv.classList.remove("hidden");
+  },
+
+  gameover() {
+    this.state = "gameover";
+    endTitle.textContent = "💀 游戏结束";
+    endText.innerHTML = "玛丽用完了所有生命。<br>最终得分：<b>" + this.score + "</b>";
+    endOv.classList.remove("hidden");
+  },
+
+  updateHUD() {
+    scoreEl.textContent = String(this.score).padStart(6, "0");
+    coinsEl.textContent = "×" + String(this.coinCount).padStart(2, "0");
+    timeEl.textContent = String(Math.max(0, Math.ceil(this.time)));
+    livesEl.textContent = "×" + this.lives;
+  },
+
+  update(dt) {
+    if (this.state === "playing") {
+      this.timeAccum += dt;
+      if (this.timeAccum >= 0.4) { this.timeAccum -= 0.4; this.time = Math.max(0, this.time - 1); this.updateHUD(); }
+      if (this.time <= 0) this.killPlayer();
+    }
+    if (this.state === "dying") {
+      player.deadT += dt;
+      player.y += player.vy * dt;
+      player.vy += GRAVITY * dt;
+      if (player.deadT > 2.0) {
+        this.lives--;
+        if (this.lives <= 0) this.gameover();
+        else this.respawn();
+      }
+      this.updateHUD();
+      return;
+    }
+    if (this.state !== "playing") return;
+
+    readInput();
+    this.updatePlayer(dt);
+    this.updateGoombas(dt);
+    this.updateItems(dt);
+    this.updateParticles(dt);
+    this.updateFloatingScores(dt);
+    this.updateBumps(dt);
+    this.updateCamera(dt);
+    this.updateCheckpoints();
+    this.updateHUD();
+  },
+
+  updatePlayer(dt) {
+    const p = player;
+    p.hitWall = 0;
+    // 输入加速
+    const accel = p.run ? 0 : (input.run ? RUN_ACCEL : MOVE_ACCEL);
+    p.run = input.run;
+    if (input.left && !input.right) { p.vx -= accel * dt; p.facing = -1; }
+    else if (input.right && !input.left) { p.vx += accel * dt; p.facing = 1; }
+    else {
+      // 摩擦
+      const fr = FRICTION * dt;
+      if (p.vx > 0) p.vx = Math.max(0, p.vx - fr);
+      else if (p.vx < 0) p.vx = Math.min(0, p.vx + fr);
+    }
+    const maxSpd = input.run ? MAX_RUN : MAX_WALK;
+    p.vx = Math.max(-maxSpd, Math.min(maxSpd, p.vx));
+
+    // 跳跃（含 0.12s 跳跃缓冲：落地前一瞬按键也不吞输入）
+    if (input.jumpBuffer > 0) input.jumpBuffer -= dt;
+    if (input.jumpBuffer > 0 && p.onGround && !p.jumping) {
+      p.vy = JUMP_V; p.onGround = false; p.jumping = true; p.jumpHold = 0;
+      input.jumpBuffer = 0; input.jumpPressed = false;
+      Sound.jump();
+    }
+    if (p.jumping && input.jump && p.jumpHold < JUMP_HOLD_MAX && p.vy < 0) {
+      p.vy += GRAVITY_HOLD * dt; // 长按期间用低重力“替代”常规重力，跳更高
+      p.jumpHold += dt;
+    } else {
+      p.vy += GRAVITY * dt; // 松开/过了长按窗口：恢复常规重力（可变跳高）
+      if (p.vy >= 0) p.jumping = false;
+    }
+    if (p.vy > MAX_FALL) p.vy = MAX_FALL;
+
+    p.onGround = false;
+    p.headBump = null;
+    collideX(p, dt);
+    collideY(p, dt, true);
+
+    // 头顶撞砖处理
+    if (p.headBump) {
+      const { r, c } = p.headBump;
+      const tile = tileAt(r, c);
+      if (tile === T.QUESTION) {
+        const content = blockContent[r + "," + c] || "coin";
+        if (content === "coin") {
+          spawnCoinPop(c * TILE + 4, r * TILE - 8);
+          this.addScore(200); this.addCoin(); Sound.coin();
+        } else if (content === "mushroom") {
+          spawnItem(c * TILE + 4, (r - 1) * TILE + 8, "mushroom");
+        }
+        level[r][c] = T.USED;
+        bumpTimers[r + "," + c] = 0.16;
+        Sound.bump();
+      } else if (tile === T.BRICK) {
+        if (p.big) {
+          level[r][c] = T.EMPTY;
+          spawnBrickDebris(c * TILE + 8, r * TILE + 8);
+          this.addScore(50); Sound.brick();
+        } else {
+          bumpTimers[r + "," + c] = 0.16;
+          Sound.bump();
+        }
+      } else if (tile === T.USED || tile === T.STAIR || tile === T.PIPE || tile === T.GROUND || tile === T.HARD) {
+        Sound.bump();
+      }
+    }
+
+    // 收集占据格子内的静态金币
+    const cr0 = Math.floor(p.y / TILE), cr1 = Math.floor((p.y + p.h - 1) / TILE);
+    const cc0 = Math.floor(p.x / TILE), cc1 = Math.floor((p.x + p.w - 1) / TILE);
+    for (let r = cr0; r <= cr1; r++) for (let c = cc0; c <= cc1; c++) {
+      if (tileAt(r, c) === T.COIN) {
+        level[r][c] = T.EMPTY;
+        const idx = coins.findIndex(o => o.r === r && o.c === c);
+        if (idx >= 0) coins.splice(idx, 1);
+        spawnCoinPop(c * TILE + 8, r * TILE);
+        this.addScore(200); this.addCoin(); Sound.coin();
+      }
+    }
+
+    // 掉坑
+    if (p.y > VH + 40) this.killPlayer();
+
+    // 动画
+    if (Math.abs(p.vx) > 8 && p.onGround) p.walkAnim += dt * Math.abs(p.vx) * 0.05;
+    // 无敌闪烁
+    if (p.invuln > 0) p.invuln -= dt;
+  },
+
+  updateGoombas(dt) {
+    for (const g of goombas) {
+      if (!g.alive) { g.squashT += dt; continue; }
+      g.anim += dt * 6;
+      // 重力
+      g.vy += GRAVITY * dt;
+      if (g.vy > MAX_FALL) g.vy = MAX_FALL;
+      g.onGround = false;
+      g.hitWall = 0;
+      // X 碰撞，碰墙反向
+      collideX(g, dt);
+      if (g.hitWall) { g.dir *= -1; g.vx = ENEMY_SPEED * g.dir; }
+      // 边缘检测：前方无地面则反向（避免主动掉坑）
+      const aheadC = Math.floor((g.x + (g.dir > 0 ? g.w + 2 : -2)) / TILE);
+      const footR = Math.floor((g.y + g.h + 2) / TILE);
+      if (g.onGround && !isSolidAt(footR, aheadC)) { g.dir *= -1; g.vx = ENEMY_SPEED * g.dir; }
+      collideY(g, dt, false);
+      // 越界
+      if (g.y > VH + 60) g.alive = false;
+
+      // 与玩家碰撞
+      if (g.alive && aabb(g, player) && player.invuln <= 0 && !player.dead) {
+        const fromTop = (player.vy > 0) && (player.y + player.h - g.y < 18);
+        if (fromTop) {
+          g.alive = false; g.squashed = true; g.squashT = 0;
+          player.vy = STOMP_V; player.jumping = false;
+          this.addScore(100);
+          floatingScores.push({ x: g.x, y: g.y - 10, text: "100", t: 0, life: .8 });
+          Sound.stomp();
+        } else {
+          this.hurtPlayer();
+        }
+      }
+    }
+    goombas = goombas.filter(g => g.alive || g.squashT < 0.5);
+  },
+
+  hurtPlayer() {
+    if (player.invuln > 0) return;
+    if (player.big) {
+      player.big = false;
+      player.h = PLAYER_SMALL.h;
+      player.y += PLAYER_BIG.h - PLAYER_SMALL.h;
+      player.invuln = 1.6;
+      Sound.bump();
+    } else {
+      this.killPlayer();
+    }
+  },
+
+  updateItems(dt) {
+    for (const it of items) {
+      if (!it.alive) continue;
+      it.anim += dt * 4;
+      if (it.emerge > 0) { it.emerge -= 40 * dt; it.y -= 40 * dt; continue; }
+      it.vy += GRAVITY * dt; if (it.vy > MAX_FALL) it.vy = MAX_FALL;
+      it.onGround = false; it.hitWall = 0;
+      collideX(it, dt); if (it.hitWall) { it.dir *= -1; it.vx = MUSH_SPEED * it.dir; }
+      collideY(it, dt, false);
+      // 道具不做边缘检测：会自然从砖顶/台阶走下，掉到地面让玩家吃到
+
+      if (aabb(it, player) && !player.dead) {
+        it.alive = false;
+        if (it.type === "mushroom") {
+          if (!player.big) {
+            player.big = true;
+            player.h = PLAYER_BIG.h;
+            player.y -= (PLAYER_BIG.h - PLAYER_SMALL.h);
+          }
+          this.addScore(1000); Sound.grow();
+          floatingScores.push({ x: it.x, y: it.y - 10, text: "1000", t: 0, life: .9 });
+        }
+      }
+    }
+    items = items.filter(i => i.alive);
+  },
+
+  updateParticles(dt) {
+    for (const p of particles) {
+      p.t += dt;
+      if (p.type === "coin") { p.y += p.vy * dt; p.vy += 1400 * dt; }
+      else if (p.type === "debris") {
+        p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 900 * dt;
+      }
+    }
+    particles = particles.filter(p => p.t < p.life);
+  },
+
+  updateFloatingScores(dt) {
+    for (const f of floatingScores) { f.t += dt; f.y -= 30 * dt; }
+    floatingScores = floatingScores.filter(f => f.t < f.life);
+  },
+
+  updateBumps(dt) {
+    for (const k in bumpTimers) {
+      bumpTimers[k] -= dt;
+      if (bumpTimers[k] <= 0) delete bumpTimers[k];
+    }
+  },
+
+  updateCamera(dt) {
+    const target = player.x + player.w / 2 - VW * 0.42;
+    camX += (target - camX) * Math.min(1, dt * 8);
+    camX = Math.max(0, Math.min(camX, (LW * TILE) - VW));
+    // 玩家不能退到屏幕左侧外
+    if (player.x < camX) { player.x = camX; if (player.vx < 0) player.vx = 0; }
+  },
+
+  updateCheckpoints() {
+    for (const cp of checkpoints) {
+      if (!cp.used && player.x > cp.x) cp.used = true;
+    }
+    // 旗杆
+    if (!this.flagSlide && player.x + player.w > this.flagX && player.x < this.flagX + 16) {
+      this.flagSlide = 0.001;
+      player.x = this.flagX - player.w;
+      player.vx = 0;
+    }
+    if (this.flagSlide > 0) {
+      this.flagSlide += dt * 2;
+      if (this.flagSlide > 1) {
+        this.win();
+      }
+    }
+  }
+};
+
+/* AABB */
+function aabb(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+/* ===================== 渲染 ===================== */
+function drawBackground() {
+  // 渐变天空
+  const g = ctx.createLinearGradient(0, 0, 0, VH);
+  g.addColorStop(0, "#5c94fc");
+  g.addColorStop(1, "#9bc4ff");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, VW, VH);
+}
+
+function drawTiles() {
+  const startC = Math.max(0, Math.floor(camX / TILE) - 1);
+  const endC = Math.min(LW - 1, Math.ceil((camX + VW) / TILE) + 1);
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = startC; c <= endC; c++) {
+      const t = level[r][c];
+      if (t === T.EMPTY) continue;
+      const x = c * TILE - camX, y = r * TILE;
+      const bump = bumpTimers[r + "," + c] ? (Math.sin((0.16 - bumpTimers[r + "," + c]) / 0.16 * Math.PI) * 8) : 0;
+      drawTile(t, x, y - bump, c, r);
+    }
+  }
+}
+
+function drawTile(t, x, y, c, r) {
+  switch (t) {
+    case T.GROUND:
+      ctx.fillStyle = "#c97333"; ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = "#a85a20"; ctx.fillRect(x, y, TILE, 3);
+      ctx.fillStyle = "#e09a55"; ctx.fillRect(x + 3, y + 3, TILE - 6, TILE - 6);
+      ctx.fillStyle = "#c97333";
+      ctx.fillRect(x + 6, y + 8, 4, 4); ctx.fillRect(x + 18, y + 8, 4, 4);
+      ctx.fillRect(x + 12, y + 18, 4, 4);
+      break;
+    case T.HARD:
+      ctx.fillStyle = "#8a8a8a"; ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = "#6a6a6a"; ctx.fillRect(x, y, TILE, 3);
+      ctx.fillStyle = "#b0b0b0"; ctx.fillRect(x + 3, y + 3, TILE - 6, TILE - 6);
+      break;
+    case T.STAIR:
+      ctx.fillStyle = "#b06030"; ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = "#8a4818"; ctx.fillRect(x, y, TILE, 4);
+      ctx.fillStyle = "#d08850"; ctx.fillRect(x + 3, y + 4, TILE - 6, TILE - 6);
+      break;
+    case T.BRICK:
+      ctx.fillStyle = "#c97333"; ctx.fillRect(x, y, TILE, TILE);
+      ctx.strokeStyle = "#7a3e10"; ctx.lineWidth = 2;
+      ctx.strokeRect(x + 1, y + 1, TILE - 2, TILE - 2);
+      ctx.beginPath();
+      ctx.moveTo(x + 1, y + TILE / 2); ctx.lineTo(x + TILE - 1, y + TILE / 2);
+      ctx.moveTo(x + TILE / 2, y + 1); ctx.lineTo(x + TILE / 2, y + TILE / 2);
+      ctx.moveTo(x + TILE / 4, y + TILE / 2); ctx.lineTo(x + TILE / 4, y + TILE - 1);
+      ctx.moveTo(x + 3 * TILE / 4, y + TILE / 2); ctx.lineTo(x + 3 * TILE / 4, y + TILE - 1);
+      ctx.stroke();
+      break;
+    case T.QUESTION:
+      drawQuestion(x, y);
+      break;
+    case T.USED:
+      ctx.fillStyle = "#9a6a30"; ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = "#7a4a18"; ctx.fillRect(x, y, TILE, 3);
+      ctx.strokeStyle = "#5a2e08"; ctx.lineWidth = 2;
+      ctx.strokeRect(x + 2, y + 2, TILE - 4, TILE - 4);
+      break;
+    case T.PIPE:
+      drawPipe(x, y, r, c);
+      break;
+    case T.COIN:
+      drawCoinTile(x, y);
+      break;
+    case T.FLAGPOLE:
+      ctx.fillStyle = "#cfcfcf"; ctx.fillRect(x + 14, y, 4, TILE);
+      ctx.fillStyle = "#2e7d2e"; ctx.beginPath(); ctx.arc(x + 16, y + 6, 5, 0, Math.PI*2); ctx.fill();
+      break;
+    case T.FLAGTOP:
+      // 旗杆顶球
+      ctx.fillStyle = "#2e7d2e"; ctx.beginPath(); ctx.arc(x + 16, y + 14, 6, 0, Math.PI*2); ctx.fill();
+      break;
+    case T.CLOUD:
+      ctx.fillStyle = "#fff";
+      ctx.beginPath(); ctx.arc(x + 8, y + 18, 8, 0, Math.PI*2); ctx.arc(x + 18, y + 14, 10, 0, Math.PI*2);
+      ctx.arc(x + 28, y + 18, 8, 0, Math.PI*2); ctx.fill();
+      break;
+    case T.HILL:
+      ctx.fillStyle = "#5aa83c";
+      ctx.beginPath(); ctx.moveTo(x, y + TILE); ctx.quadraticCurveTo(x + 16, y - 8, x + 32, y + TILE); ctx.fill();
+      ctx.fillStyle = "#3e8a26";
+      ctx.beginPath(); ctx.arc(x + 12, y + 16, 3, 0, Math.PI*2); ctx.arc(x + 22, y + 20, 2, 0, Math.PI*2); ctx.fill();
+      break;
+    case T.BUSH:
+      ctx.fillStyle = "#3e8a26";
+      ctx.beginPath(); ctx.arc(x + 8, y + TILE - 6, 10, 0, Math.PI*2);
+      ctx.arc(x + 20, y + TILE - 6, 10, 0, Math.PI*2); ctx.fill();
+      ctx.fillRect(x, y + TILE - 10, TILE, 10);
+      break;
+  }
+}
+
+function drawQuestion(x, y) {
+  const t = performance.now() / 300;
+  const shade = (Math.sin(t) * 0.5 + 0.5);
+  ctx.fillStyle = `rgb(${230 - shade*40}, ${170 - shade*30}, ${40})`;
+  ctx.fillRect(x, y, TILE, TILE);
+  ctx.fillStyle = "#e0b020";
+  ctx.fillRect(x + 3, y + 3, TILE - 6, TILE - 6);
+  ctx.strokeStyle = "#7a4a08"; ctx.lineWidth = 2;
+  ctx.strokeRect(x + 1, y + 1, TILE - 2, TILE - 2);
+  // 角点
+  ctx.fillStyle = "#fff7c0";
+  ctx.fillRect(x + 3, y + 3, 4, 4);
+  // 问号
+  ctx.fillStyle = "#5a3a08";
+  ctx.font = "bold 20px Georgia"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText("?", x + 16, y + 17);
+}
+
+function drawPipe(x, y, r, c) {
+  const isTop = tileAt(r - 1, c) !== T.PIPE;
+  ctx.fillStyle = "#3aa83a";
+  ctx.fillRect(x, y, TILE, TILE);
+  ctx.fillStyle = "#2a8a2a";
+  ctx.fillRect(x, y, 8, TILE); // 左暗
+  ctx.fillStyle = "#7ae070";
+  ctx.fillRect(x + 20, y, 6, TILE); // 右高光
+  ctx.fillStyle = "#1e6e1e";
+  ctx.fillRect(x + 30, y, 2, TILE);
+  if (isTop) {
+    ctx.fillStyle = "#3aa83a";
+    ctx.fillRect(x - 2, y, TILE + 4, 8);
+    ctx.fillStyle = "#2a8a2a"; ctx.fillRect(x - 2, y, 6, 8);
+    ctx.fillStyle = "#7ae070"; ctx.fillRect(x + 24, y, 6, 8);
+    ctx.strokeStyle = "#1e6e1e"; ctx.lineWidth = 2;
+    ctx.strokeRect(x - 2, y + 1, TILE + 4, 6);
+  }
+}
+
+function drawCoinTile(x, y) {
+  const t = performance.now() / 200 + x * 0.1;
+  const sx = Math.abs(Math.cos(t)) * 8 + 2;
+  ctx.fillStyle = "#ffd840";
+  ctx.beginPath(); ctx.ellipse(x + 16, y + 16, sx, 12, 0, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = "#b08010"; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = "#fff6a0";
+  ctx.fillRect(x + 15, y + 10, 2, 12);
+}
+
+function drawCoins() {
+  for (const co of coins) {
+    const x = co.x - camX;
+    if (x < -TILE || x > VW) continue;
+    drawCoinTile(x, co.y);
+  }
+}
+
+/* ---- 玩家绘制（用形状组合，类马里奥形象） ---- */
+function drawPlayer() {
+  const p = player;
+  if (p.invuln > 0 && Math.floor(p.invuln * 20) % 2 === 0) return; // 闪烁
+  const x = Math.round(p.x - camX), y = Math.round(p.y);
+  const big = p.big;
+  const f = p.facing;
+  const moving = Math.abs(p.vx) > 8 && p.onGround;
+  const frame = moving ? Math.floor(p.walkAnim) % 4 : 0;
+  const jumping = !p.onGround;
+
+  ctx.save();
+  ctx.translate(x + p.w / 2, y);
+  ctx.scale(f, 1);
+  ctx.translate(-p.w / 2, 0);
+
+  const skin = "#fcb985", red = "#e02020", blue = "#2848d8", brown = "#7a3a10", shoe = "#5a2a08";
+
+  if (big) {
+    // 大玛丽 22x54
+    // 鞋
+    ctx.fillStyle = shoe;
+    if (jumping) { ctx.fillRect(2, 48, 9, 6); ctx.fillRect(11, 48, 9, 6); }
+    else if (frame === 0 || frame === 2) { ctx.fillRect(1, 48, 10, 6); ctx.fillRect(11, 48, 10, 6); }
+    else if (frame === 1) { ctx.fillRect(4, 48, 11, 6); ctx.fillRect(11, 48, 9, 6); }
+    else { ctx.fillRect(1, 48, 9, 6); ctx.fillRect(10, 48, 11, 6); }
+    // 裤腿
+    ctx.fillStyle = blue;
+    ctx.fillRect(2, 36, 8, 14); ctx.fillRect(12, 36, 8, 14);
+    // 上衣（红色身体+蓝色背带）
+    ctx.fillStyle = red; ctx.fillRect(2, 20, 18, 18);
+    ctx.fillStyle = blue;
+    ctx.fillRect(5, 20, 3, 18); ctx.fillRect(14, 20, 3, 18); // 背带
+    ctx.fillRect(2, 32, 18, 6); // 裤腰
+    // 手
+    ctx.fillStyle = skin;
+    if (jumping) { ctx.fillRect(0, 22, 4, 10); ctx.fillRect(18, 22, 4, 10); }
+    else { ctx.fillRect(0, 26, 4, 8); ctx.fillRect(18, 26, 4, 8); }
+    // 头
+    ctx.fillStyle = skin; ctx.fillRect(3, 6, 16, 14);
+    // 帽
+    ctx.fillStyle = red;
+    ctx.fillRect(2, 3, 18, 6);
+    ctx.fillRect(8, 6, 14, 3); // 帽檐
+    // 头发鬓角
+    ctx.fillStyle = brown; ctx.fillRect(3, 8, 4, 6);
+    // 眼
+    ctx.fillStyle = "#222"; ctx.fillRect(11, 10, 2, 3);
+    // 鼻
+    ctx.fillStyle = skin; ctx.fillRect(15, 12, 4, 3);
+    // 胡子
+    ctx.fillStyle = brown; ctx.fillRect(11, 15, 8, 2);
+  } else {
+    // 小玛丽 22x28
+    ctx.fillStyle = shoe;
+    if (jumping) { ctx.fillRect(2, 24, 8, 4); ctx.fillRect(11, 24, 8, 4); }
+    else if (frame === 0 || frame === 2) { ctx.fillRect(1, 24, 9, 4); ctx.fillRect(12, 24, 9, 4); }
+    else if (frame === 1) { ctx.fillRect(4, 24, 10, 4); ctx.fillRect(12, 24, 8, 4); }
+    else { ctx.fillRect(1, 24, 8, 4); ctx.fillRect(11, 24, 10, 4); }
+    // 裤腿
+    ctx.fillStyle = blue; ctx.fillRect(3, 17, 7, 8); ctx.fillRect(12, 17, 7, 8);
+    // 身体
+    ctx.fillStyle = red; ctx.fillRect(3, 9, 16, 9);
+    ctx.fillStyle = blue; ctx.fillRect(5, 9, 2, 9); ctx.fillRect(15, 9, 2, 9);
+    // 手
+    ctx.fillStyle = skin;
+    if (jumping) { ctx.fillRect(0, 11, 3, 7); ctx.fillRect(19, 11, 3, 7); }
+    else { ctx.fillRect(0, 13, 3, 6); ctx.fillRect(19, 13, 3, 6); }
+    // 头
+    ctx.fillStyle = skin; ctx.fillRect(4, 2, 14, 8);
+    // 帽
+    ctx.fillStyle = red; ctx.fillRect(3, 0, 16, 4); ctx.fillRect(8, 3, 12, 2);
+    // 鬓角
+    ctx.fillStyle = brown; ctx.fillRect(4, 4, 3, 4);
+    // 眼
+    ctx.fillStyle = "#222"; ctx.fillRect(11, 5, 2, 2);
+    // 鼻
+    ctx.fillStyle = skin; ctx.fillRect(14, 7, 3, 2);
+    // 胡子
+    ctx.fillStyle = brown; ctx.fillRect(11, 8, 7, 2);
+  }
+  ctx.restore();
+}
+
+function drawGoombas() {
+  for (const g of goombas) {
+    const x = Math.round(g.x - camX), y = Math.round(g.y);
+    if (x < -40 || x > VW + 40) continue;
+    if (g.squashed) {
+      ctx.fillStyle = "#8a4a18";
+      ctx.fillRect(x, y + g.h - 8, g.w, 8);
+      ctx.fillStyle = "#3a1a08";
+      ctx.fillRect(x + 2, y + g.h - 6, g.w - 4, 2);
+      continue;
+    }
+    const wob = Math.sin(g.anim) * 1.5;
+    ctx.save();
+    ctx.translate(x + g.w / 2, y);
+    // 身体（栗子头）
+    ctx.fillStyle = "#9a5a20";
+    ctx.beginPath();
+    ctx.ellipse(0, 12 + wob, 13, 12, 0, Math.PI, 0); // 上半圆
+    ctx.fill();
+    ctx.fillRect(-13, 12, 26, 10);
+    ctx.fillStyle = "#7a3e10";
+    ctx.fillRect(-13, 20, 26, 2);
+    // 脚
+    ctx.fillStyle = "#3a1a08";
+    const fo = Math.sin(g.anim) * 2;
+    ctx.fillRect(-12 + fo, 22, 9, 5);
+    ctx.fillRect(3 - fo, 22, 9, 5);
+    // 眼睛
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(-8, 9, 5, 6); ctx.fillRect(3, 9, 5, 6);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(-6, 11, 2, 4); ctx.fillRect(5, 11, 2, 4);
+    // 眉毛
+    ctx.fillStyle = "#3a1a08";
+    ctx.fillRect(-9, 7, 7, 2); ctx.fillRect(2, 7, 7, 2);
+    ctx.restore();
+  }
+}
+
+function drawItems() {
+  for (const it of items) {
+    const x = Math.round(it.x - camX), y = Math.round(it.y);
+    if (x < -40 || x > VW + 40) continue;
+    // 蘑菇
+    ctx.save();
+    ctx.translate(x + it.w / 2, y);
+    // 茎
+    ctx.fillStyle = "#f0d8a8";
+    ctx.fillRect(-6, 12, 12, 12);
+    ctx.fillStyle = "#c8a878";
+    ctx.fillRect(-6, 18, 12, 3);
+    // 菌盖
+    ctx.fillStyle = "#e02020";
+    ctx.beginPath(); ctx.ellipse(0, 8, 12, 9, 0, Math.PI, 0); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(-5, 4, 3, 0, Math.PI*2); ctx.arc(5, 4, 3, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, 2, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const x = p.x - camX, y = p.y;
+    if (p.type === "coin") {
+      ctx.fillStyle = "#ffd840";
+      ctx.beginPath(); ctx.ellipse(x, y, 6, 10, 0, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = "#b08010"; ctx.lineWidth = 1; ctx.stroke();
+    } else if (p.type === "debris") {
+      ctx.fillStyle = "#c97333";
+      ctx.fillRect(x, y, 6, 6);
+      ctx.strokeStyle = "#7a3e10"; ctx.strokeRect(x, y, 6, 6);
+    }
+  }
+}
+
+function drawFloatingScores() {
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 12px 'Courier New', monospace";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for (const f of floatingScores) {
+    const x = f.x - camX + 12;
+    ctx.globalAlpha = Math.max(0, 1 - f.t / f.life);
+    ctx.fillText(f.text, x, f.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawFlag() {
+  // 旗子在旗杆上的滑动
+  const px = game.flagX - camX;
+  if (px < -40 || px > VW + 40) return;
+  // 旗布
+  const slide = game.flagSlide > 0 ? Math.min(1, game.flagSlide) : 0;
+  const flagY = 3 * TILE + slide * (9 * TILE);
+  ctx.fillStyle = "#2e9d2e";
+  ctx.beginPath();
+  ctx.moveTo(px - 2, flagY);
+  ctx.lineTo(px - 26, flagY + 10);
+  ctx.lineTo(px - 2, flagY + 20);
+  ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.beginPath(); ctx.arc(px - 18, flagY + 10, 3, 0, Math.PI*2); ctx.fill();
+}
+
+function render() {
+  drawBackground();
+  drawTiles();
+  drawCoins();
+  drawItems();
+  drawFlag();
+  drawGoombas();
+  drawPlayer();
+  drawParticles();
+  drawFloatingScores();
+}
+
+/* ===================== 主循环 ===================== */
+let dt = 0, lastT = performance.now();
+function frame(now) {
+  dt = (now - lastT) / 1000;
+  lastT = now;
+  if (dt > 0.05) dt = 0.05;
+  game.update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+
+/* ===================== 初始化 ===================== */
+buildLevel();
+player = makePlayer(false);
+camX = 0;
+game.state = "ready";
+render();
+
+document.getElementById("startBtn").addEventListener("click", () => game.start());
+document.getElementById("restartBtn").addEventListener("click", () => game.start());
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
